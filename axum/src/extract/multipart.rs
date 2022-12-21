@@ -7,7 +7,7 @@ use crate::body::{Bytes, HttpBody};
 use crate::BoxError;
 use async_trait::async_trait;
 use axum_core::RequestExt;
-use futures_util::stream::Stream;
+use futures_util::stream::{Stream, StreamExt};
 use http::header::{HeaderMap, CONTENT_TYPE};
 use http::Request;
 use std::{
@@ -93,6 +93,25 @@ impl Multipart {
         } else {
             Ok(None)
         }
+    }
+
+    /// TODO: docs
+    pub fn map_fields_into_stream<F, T>(
+        self,
+        map_field: F,
+    ) -> impl Stream<Item = Result<T, MultipartError>>
+    where
+        F: FnMut(Field<'_>) -> T + Clone,
+    {
+        futures_util::stream::try_unfold(self, move |mut multipart| {
+            let mut map_field = map_field.clone();
+            async move {
+                match multipart.next_field().await? {
+                    Some(field) => Ok(Some((map_field(field), multipart))),
+                    None => Ok(None),
+                }
+            }
+        })
     }
 }
 
@@ -197,6 +216,24 @@ impl<'a> Field<'a> {
             .await
             .map_err(MultipartError::from_multer)
     }
+
+    /// TODO: docs
+    pub fn into_stream(self) -> impl Stream<Item = Result<Bytes, MultipartError>> {
+        let field = self.inner;
+
+        futures_util::stream::try_unfold(field, move |mut field| async move {
+            if let Some(chunk) = field
+                .next()
+                .await
+                .transpose()
+                .map_err(MultipartError::from_multer)?
+            {
+                Ok(Some((chunk, field)))
+            } else {
+                Ok(None)
+            }
+        })
+    }
 }
 
 /// Errors associated with parsing `multipart/form-data` requests.
@@ -248,7 +285,13 @@ define_rejection! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{body::Body, response::IntoResponse, routing::post, test_helpers::*, Router};
+    use crate::{
+        body::{self, Body},
+        response::{IntoResponse, Response},
+        routing::post,
+        test_helpers::*,
+        Router,
+    };
 
     #[tokio::test]
     async fn content_type_with_encoding() {
@@ -285,5 +328,20 @@ mod tests {
     fn _multipart_from_request_limited() {
         async fn handler(_: Multipart) {}
         let _app: Router<(), http_body::Limited<Body>> = Router::new().route("/", post(handler));
+    }
+
+    #[allow(dead_code)]
+    fn stream_fields_directly() {
+        use futures_util::TryStreamExt;
+
+        async fn handler(multipart: Multipart) -> Response {
+            let byte_stream = multipart
+                .map_fields_into_stream(|field| field.into_stream())
+                .try_flatten();
+
+            body::boxed(Body::wrap_stream(byte_stream)).into_response()
+        }
+
+        let _: Router = Router::new().route("/", post(handler));
     }
 }
