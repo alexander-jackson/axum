@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 # Unreleased
 
 - **added:** Add `body_text` and `status` methods to built-in rejections ([#1612])
+- **added:** Add `Multipart::into_stream` and `Field::into_stream`
 
 [#1612]: https://github.com/tokio-rs/axum/pull/1612
 

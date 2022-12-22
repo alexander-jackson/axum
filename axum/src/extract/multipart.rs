@@ -95,13 +95,69 @@ impl Multipart {
         }
     }
 
-    /// TODO: docs
-    pub fn map_fields_into_stream<F, T>(
+    /// Convert the multipart body into a stream by mapping each field.
+    ///
+    /// This enables processing each field in a stream, without buffering the contents all at
+    /// once.
+    ///
+    /// # Example
+    ///
+    /// Upload each part without buffering the contents of each field:
+    ///
+    /// ```
+    /// use futures::prelude::*;
+    /// use axum::{
+    ///     Router,
+    ///     routing::post,
+    ///     extract::Multipart,
+    ///     BoxError,
+    ///     http::StatusCode,
+    ///     body::Bytes,
+    /// };
+    ///
+    /// async fn handler(multipart: Multipart) -> Result<(), StatusCode> {
+    ///     let stream = multipart
+    ///         // convert into a stream of file name + stream of contents
+    ///         .into_stream(|field| {
+    ///             if let Some(file_name) = field.file_name() {
+    ///                 Some((file_name.to_owned(), field.into_stream()))
+    ///             } else {
+    ///                 None
+    ///             }
+    ///         })
+    ///         // ignore fields that don't have a file name
+    ///         .try_filter_map(|item| std::future::ready(Ok(item)));
+    ///
+    ///     // pin the stream to the stack. This is necessary to consume the stream
+    ///     futures::pin_mut!(stream);
+    ///
+    ///     // consume the stream and upload each file
+    ///     while let Some(Ok((file_name, contents))) = stream.next().await {
+    ///         upload_file(file_name, contents)
+    ///             .await
+    ///             .map_err(|err| StatusCode::BAD_REQUEST)?;
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    ///
+    /// async fn upload_file<S, E>(file_name: String, contents: S) -> Result<(), E>
+    /// where
+    ///     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    /// {
+    ///     // ...
+    ///     # Ok(())
+    /// }
+    ///
+    /// let app = Router::new().route("/upload", post(handler));
+    /// # let _: Router = app;
+    /// ```
+    pub fn into_stream<F, T>(
         self,
         map_field: F,
-    ) -> impl Stream<Item = Result<T, MultipartError>>
+    ) -> impl Stream<Item = Result<T, MultipartError>> + Send + 'static
     where
-        F: FnMut(Field<'_>) -> T + Clone,
+        F: FnMut(Field<'_>) -> T + Clone + Send + 'static,
     {
         futures_util::stream::try_unfold(self, move |mut multipart| {
             let mut map_field = map_field.clone();
@@ -217,8 +273,8 @@ impl<'a> Field<'a> {
             .map_err(MultipartError::from_multer)
     }
 
-    /// TODO: docs
-    pub fn into_stream(self) -> impl Stream<Item = Result<Bytes, MultipartError>> {
+    /// Convert the field into a stream of chunks.
+    pub fn into_stream(self) -> impl Stream<Item = Result<Bytes, MultipartError>> + Send + 'static {
         let field = self.inner;
 
         futures_util::stream::try_unfold(field, move |mut field| async move {
@@ -336,7 +392,7 @@ mod tests {
 
         async fn handler(multipart: Multipart) -> Response {
             let byte_stream = multipart
-                .map_fields_into_stream(|field| field.into_stream())
+                .into_stream(|field| field.into_stream())
                 .try_flatten();
 
             body::boxed(Body::wrap_stream(byte_stream)).into_response()
